@@ -22,6 +22,45 @@ HIGH_MATCH = 0.55
 COMPLETION_WORDS = ["посмотрел", "посмотрела", "прочитал", "прочитала", "сделано",
                      "закончил", "закончила", "завершил", "завершила", "сходил",
                      "сходила", "съездил", "съездила", "прошёл", "прошла"]
+WEEKDAY_MAP = {
+    "monday": 0, "понедельник": 0, "пн": 0,
+    "tuesday": 1, "вторник": 1, "вт": 1,
+    "wednesday": 2, "среда": 2, "ср": 2,
+    "thursday": 3, "четверг": 3, "чт": 3,
+    "friday": 4, "пятница": 4, "пт": 4,
+    "saturday": 5, "суббота": 5, "сб": 5,
+    "sunday": 6, "воскресенье": 6, "вс": 6,
+}
+
+
+def normalize_habit_fields(fields: dict) -> dict:
+    """
+    Claude doesn't reliably use the exact field names we ask for in the
+    prompt (seen in practice: day, day_of_week, frequency instead of
+    weekday/recurring). This recovers the weekday from whatever
+    reasonable field/format shows up, rather than depending on the
+    model following the schema perfectly every time.
+    """
+    f = dict(fields or {})
+    day_val = None
+    for key in ("weekday", "day_of_week", "day", "weekDay", "dow"):
+        if f.get(key) not in (None, ""):
+            day_val = f[key]
+            break
+    if day_val is not None:
+        if isinstance(day_val, str):
+            wd = WEEKDAY_MAP.get(day_val.strip().lower())
+        else:
+            try:
+                wd = int(day_val)
+            except (TypeError, ValueError):
+                wd = None
+        if wd is not None:
+            f["weekday"] = wd
+            f["recurring"] = True
+    if str(f.get("frequency", "")).lower() in ("weekly", "daily", "recurring"):
+        f["recurring"] = True
+    return f
 
 
 def now():
@@ -149,7 +188,10 @@ async def send_message(payload: MessageIn, db: Session = Depends(get_db)):
                 target.name = edit["new_name"]
             if edit.get("new_type"):
                 target.type = edit["new_type"]
-            target.attributes = {**(target.attributes or {}), **(edit.get("new_fields") or {})}
+            new_fields = edit.get("new_fields") or {}
+            if target.type == "habit":
+                new_fields = normalize_habit_fields(new_fields)
+            target.attributes = {**(target.attributes or {}), **new_fields}
             target.updated_at = now()
             log_change(db, target.id, "edit", edit, 1.0, "explicit_edit",
                        [f'пользователь явно указал существующую сущность "{old_name}"'], source_msg_id)
@@ -177,6 +219,8 @@ async def send_message(payload: MessageIn, db: Session = Depends(get_db)):
 
     for cand in analysis["candidates"]:
         cand["fields"] = normalize_fields(cand.get("fields", {}))
+        if cand["type"] == "habit":
+            cand["fields"] = normalize_habit_fields(cand["fields"])
         best, score = find_match(db, cand["type"], cand["name"])
         final_conf = (cand.get("confidence", 0.5) + score) / 2
 
