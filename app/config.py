@@ -17,6 +17,10 @@ class Settings:
     # shared secret is enough — no user accounts/passwords needed.
     AUTH_TOKEN: str = os.environ.get("APP_AUTH_TOKEN", "")
 
+    # Anthropic API — needed for the chat pipeline's NLU step.
+    ANTHROPIC_API_KEY: str = os.environ.get("ANTHROPIC_API_KEY", "")
+    CLAUDE_MODEL: str = os.environ.get("CLAUDE_MODEL", "claude-sonnet-5")
+
     # SQLite database file location.
     DATABASE_URL: str = os.environ.get(
         "DATABASE_URL", f"sqlite:///{Path(__file__).resolve().parent.parent / 'data' / 'lifeos.db'}"
@@ -32,4 +36,9 @@ if not settings.AUTH_TOKEN:
     raise RuntimeError(
         "APP_AUTH_TOKEN is not set. Create backend/.env from .env.example "
         "and set a secret token before starting the app."
+    )
+if not settings.ANTHROPIC_API_KEY:
+    raise RuntimeError(
+        "ANTHROPIC_API_KEY is not set. Get a key from console.anthropic.com "
+        "and set it before starting the app."
     )

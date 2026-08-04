@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import Column, Integer, String, Text, DateTime
+from sqlalchemy import Column, Integer, String, Text, DateTime, Boolean, Float, JSON
 
 from app.db import Base
 
@@ -39,3 +39,56 @@ class RawLog(Base):
 
 def new_id() -> str:
     return str(uuid.uuid4())
+
+
+class Entity(Base):
+    """
+    Any tracked thing: person, project, event, goal, habit, task,
+    movie, show, book, game, leisure, lifephase (singleton).
+    `attributes` is a flexible JSON bag — schema is per-type by convention,
+    not enforced, so new fields never require a migration.
+    """
+    __tablename__ = "entities"
+
+    id = Column(String, primary_key=True, default=new_id)
+    type = Column(String, nullable=False, index=True)
+    name = Column(String, nullable=False)
+    attributes = Column(JSON, nullable=False, default=dict)
+    is_active = Column(Boolean, nullable=False, default=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow)
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow)
+
+
+class ChangeLogEntry(Base):
+    """
+    Append-only log of every create/update/delete, each carrying a
+    decision_trace so "why is this here" is always answerable from
+    what was recorded, not re-derived after the fact.
+    """
+    __tablename__ = "change_log"
+
+    id = Column(String, primary_key=True, default=new_id)
+    entity_id = Column(String, index=True, nullable=True)
+    field = Column(String, nullable=True)
+    value = Column(JSON, nullable=True)
+    timestamp = Column(DateTime(timezone=True), nullable=False, default=_utcnow)
+    confidence = Column(Float, nullable=True)
+    decision_trace = Column(JSON, nullable=True)
+    source_message_id = Column(String, nullable=True)
+
+
+class PendingAction(Base):
+    """
+    An unresolved clarification the pipeline is waiting on — e.g. an
+    ambiguous entity match. The next user message is checked against
+    this before running the normal pipeline.
+    """
+    __tablename__ = "pending_actions"
+
+    id = Column(String, primary_key=True, default=new_id)
+    conversation_id = Column(String, nullable=False, default="default")
+    question = Column(String, nullable=False)
+    candidate = Column(JSON, nullable=False)
+    matched_entity_id = Column(String, nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow)
+    resolved = Column(Boolean, nullable=False, default=False)
