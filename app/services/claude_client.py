@@ -1,3 +1,4 @@
+import asyncio
 import json
 import re
 import httpx
@@ -54,23 +55,35 @@ async def call_claude(user_message: str, today_str: str, lifephase: dict | None,
     )
     user_content = f"{context_block}\n\nСообщение пользователя: \"{user_message}\""
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        resp = await client.post(
-            "https://api.anthropic.com/v1/messages",
-            headers={
-                "x-api-key": settings.ANTHROPIC_API_KEY,
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json",
-            },
-            json={
-                "model": settings.CLAUDE_MODEL,
-                "max_tokens": 1000,
-                "system": system,
-                "messages": [{"role": "user", "content": user_content}],
-            },
-        )
-        resp.raise_for_status()
-        data = resp.json()
+    last_error: Exception | None = None
+    for attempt in range(3):
+        try:
+            async with httpx.AsyncClient(timeout=45.0) as client:
+                resp = await client.post(
+                    "https://api.anthropic.com/v1/messages",
+                    headers={
+                        "x-api-key": settings.ANTHROPIC_API_KEY,
+                        "anthropic-version": "2023-06-01",
+                        "content-type": "application/json",
+                    },
+                    json={
+                        "model": settings.CLAUDE_MODEL,
+                        "max_tokens": 1000,
+                        "system": system,
+                        "messages": [{"role": "user", "content": user_content}],
+                    },
+                )
+                resp.raise_for_status()
+                data = resp.json()
+            break
+        except (httpx.RemoteProtocolError, httpx.ReadError, httpx.ConnectError, httpx.ReadTimeout) as e:
+            last_error = e
+            if attempt < 2:
+                await asyncio.sleep(0.5 * (attempt + 1))
+                continue
+            raise RuntimeError(f"Не удалось связаться с Claude API после {attempt + 1} попыток: {e}")
+    else:
+        raise RuntimeError(f"Не удалось связаться с Claude API: {last_error}")
 
     text_block = next((b["text"] for b in data.get("content", []) if b.get("type") == "text"), None)
     if not text_block:
