@@ -72,7 +72,7 @@ async def call_claude(user_message: str, today_str: str, lifephase: dict | None,
                     },
                     json={
                         "model": settings.CLAUDE_MODEL,
-                        "max_tokens": 1000,
+                        "max_tokens": 4096,
                         "system": system,
                         "messages": [{"role": "user", "content": user_content}],
                     },
@@ -91,7 +91,8 @@ async def call_claude(user_message: str, today_str: str, lifephase: dict | None,
 
     text_block = next((b["text"] for b in data.get("content", []) if b.get("type") == "text"), None)
     if not text_block:
-        raise RuntimeError("Empty response from Claude")
+        stop_reason = data.get("stop_reason", "неизвестно")
+        raise RuntimeError(f"Пустой ответ от Claude (stop_reason: {stop_reason}) — возможно, сообщение слишком объёмное/сложное для одного запроса")
 
     cleaned = re.sub(r"```json|```", "", text_block).strip()
     return json.loads(cleaned)
