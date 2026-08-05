@@ -176,6 +176,16 @@ async def send_message(payload: MessageIn, db: Session = Depends(get_db)):
                         PendingAction.resolved == False)  # noqa: E712
                .order_by(desc(PendingAction.created_at)).first())
     if pending:
+        pending_created = pending.created_at
+        if pending_created.tzinfo is None:
+            pending_created = pending_created.replace(tzinfo=timezone.utc)
+        if (now() - pending_created).total_seconds() > 900:
+            # Stale (>15 min old) — don't let an old, forgotten question
+            # hijack an unrelated new message. Dismiss it, proceed normally.
+            pending.resolved = True
+            db.commit()
+            pending = None
+    if pending:
         answer = payload.content.lower()
         cand = pending.candidate
         if "тот же" in answer or answer.strip().startswith("да"):
