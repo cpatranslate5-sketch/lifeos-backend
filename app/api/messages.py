@@ -156,11 +156,17 @@ def normalize_habit_fields(fields: dict) -> dict:
     return f
 
 
-def find_match(db: Session, cand_type: str, cand_name: str, space: str, profile: str):
+def find_match(db: Session, cand_type: str, cand_name: str, space: str, profile: str, cand_date: str | None = None):
     best, best_score = None, 0.0
     entities = db.query(Entity).filter(Entity.type == cand_type, Entity.is_active == True,  # noqa: E712
                                         Entity.space == space, Entity.profile == profile).all()
     for e in entities:
+        # For events (and anything else with an explicit date), two different
+        # concrete dates mean two different occurrences no matter how similar
+        # the names are — e.g. two fixtures between the same two teams,
+        # home and away, share every word in the name.
+        if cand_type == "event" and cand_date and e.attributes.get("date") and e.attributes["date"] != cand_date:
+            continue
         score = similarity(e.name, cand_name)
         if score > best_score:
             best, best_score = e, score
@@ -328,7 +334,7 @@ async def send_message(payload: MessageIn, db: Session = Depends(get_db)):
         cand["fields"] = normalize_fields(cand.get("fields", {}))
         if cand["type"] == "habit":
             cand["fields"] = normalize_habit_fields(cand["fields"])
-        best, score = find_match(db, cand["type"], cand["name"], payload.space, payload.profile)
+        best, score = find_match(db, cand["type"], cand["name"], payload.space, payload.profile, cand["fields"].get("date"))
         final_conf = (cand.get("confidence", 0.5) + score) / 2
 
         if best and score >= HIGH_MATCH:
