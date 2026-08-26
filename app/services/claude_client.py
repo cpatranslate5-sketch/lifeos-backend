@@ -115,7 +115,7 @@ async def call_claude(user_message: str, today_str: str, lifephase: dict | None,
     )
     user_content = f"{context_block}\n\nСообщение пользователя: \"{user_message}\""
 
-    text_block = await _post_to_claude(system, user_content, max_tokens=4096)
+    text_block = await _post_to_claude(system, user_content, max_tokens=16000)
     cleaned = re.sub(r"```json|```", "", text_block).strip()
     return json.loads(cleaned)
 
