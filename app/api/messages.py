@@ -201,7 +201,13 @@ async def send_message(payload: MessageIn, db: Session = Depends(get_db)):
         pending_created = pending.created_at
         if pending_created.tzinfo is None:
             pending_created = pending_created.replace(tzinfo=timezone.utc)
-        if (now() - pending_created).total_seconds() > 900:
+        stale_by_time = (now() - pending_created).total_seconds() > 900
+        # A short yes/no-shaped reply is a real answer to "тот же или новый?";
+        # anything long (like a fresh bulk message) clearly isn't, even if it
+        # arrives before the 15-minute window — treat the pending as stale
+        # rather than silently swallowing the new message as a one-word answer.
+        stale_by_length = len(payload.content.strip()) > 40
+        if stale_by_time or stale_by_length:
             pending.resolved = True
             db.commit()
             pending = None
