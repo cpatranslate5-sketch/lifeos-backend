@@ -66,9 +66,12 @@ def similarity(a: str, b: str) -> float:
 
 async def _post_to_claude(system: str, user_content: str, max_tokens: int = 1000) -> str:
     last_error: Exception | None = None
+    # Таймаут рассчитан с запасом под очень большие пакетные запросы
+    # (например, создание сотни карточек фильмов за одно сообщение) —
+    # такому объёму генерации нужно заметно больше 45 секунд.
     for attempt in range(3):
         try:
-            async with httpx.AsyncClient(timeout=45.0) as client:
+            async with httpx.AsyncClient(timeout=180.0) as client:
                 resp = await client.post(
                     "https://api.anthropic.com/v1/messages",
                     headers={
