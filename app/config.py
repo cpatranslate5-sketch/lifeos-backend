@@ -16,16 +16,6 @@ class Settings:
     # shared secret is enough — no user accounts/passwords needed.
     AUTH_TOKEN: str = os.environ.get("APP_AUTH_TOKEN", "")
 
-    # Optional per-folder passwords, checked at the profile-picker screen.
-    # A folder with no password set (empty string) requires none — fully
-    # backward compatible, opt-in per folder.
-    FOLDER_PASSWORDS: dict[str, str] = {
-        "nemalenkiy": os.environ.get("FOLDER_PASSWORD_NEMALENKIY", ""),
-        "kotyonok": os.environ.get("FOLDER_PASSWORD_KOTYONOK", ""),
-        "ilyusha": os.environ.get("FOLDER_PASSWORD_ILYUSHA", ""),
-        "pd": os.environ.get("FOLDER_PASSWORD_PD", ""),
-    }
-
     # Anthropic API — needed for the chat pipeline's NLU step.
     ANTHROPIC_API_KEY: str = os.environ.get("ANTHROPIC_API_KEY", "")
     CLAUDE_MODEL: str = os.environ.get("CLAUDE_MODEL", "claude-sonnet-5")
