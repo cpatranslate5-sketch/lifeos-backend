@@ -58,6 +58,23 @@ def set_folder_password(payload: SetFolderPasswordIn):
     return {"ok": True}
 
 
+class ChangeFolderPasswordIn(BaseModel):
+    folder: str
+    old_password: str
+    new_password: str
+
+
+@router.post("/folder-change-password")
+def change_folder_password(payload: ChangeFolderPasswordIn):
+    passwords = _load()
+    stored_hash = passwords.get(payload.folder)
+    if not stored_hash or _hash(payload.old_password) != stored_hash:
+        raise HTTPException(401, "Текущий пароль неверен")
+    passwords[payload.folder] = _hash(payload.new_password)
+    _save(passwords)
+    return {"ok": True}
+
+
 @router.get("/folder-has-password")
 def folder_has_password(folder: str):
     passwords = _load()
