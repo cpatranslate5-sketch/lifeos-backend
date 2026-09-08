@@ -298,20 +298,24 @@ async def _apply_enrichment(e: Entity, data: dict) -> None:
 
 class EnrichTmdbIn(BaseModel):
     profile: str
+    type: str
     space: str = "life"
 
 
 @router.post("/entities/enrich-tmdb")
 async def enrich_tmdb(payload: EnrichTmdbIn, db: Session = Depends(get_db)):
     """
-    Auto-fills year/author-director/actors/genres/country/cover for
-    movie, show, and book cards that only have a title so far (i.e. no
-    genres set yet). Cards that already have genres are left untouched,
-    so manual edits are never overwritten by a re-run.
+    Auto-fills year/author-director/actors/genres/country/cover for movie,
+    show, or book cards (whichever one type is passed in) that only have a
+    title so far (i.e. no genres set yet). Cards that already have genres
+    are left untouched, so manual edits are never overwritten by a re-run.
     """
+    if payload.type not in ("movie", "show", "book"):
+        raise HTTPException(400, "Unsupported type")
+
     candidates = (db.query(Entity)
                   .filter(Entity.profile == payload.profile, Entity.space == payload.space,
-                          Entity.type.in_(["movie", "show", "book"]), Entity.is_active == True)  # noqa: E712
+                          Entity.type == payload.type, Entity.is_active == True)  # noqa: E712
                   .all())
     to_enrich = [e for e in candidates if not (e.attributes or {}).get("genres")]
 
