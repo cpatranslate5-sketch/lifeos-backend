@@ -2,14 +2,17 @@ import os
 import uuid
 from datetime import datetime, timezone
 
+import httpx
 from fastapi import APIRouter, Depends, Query, HTTPException, UploadFile, File
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.auth import require_auth
+from app.config import settings
 from app.db import get_db
 from app.models import Entity, ChangeLogEntry
+from app.services import tmdb_client
 
 router = APIRouter(dependencies=[Depends(require_auth)])
 public_router = APIRouter()  # cover image serving only — <img> tags can't send auth headers
@@ -249,6 +252,74 @@ def propagate_cover(payload: PropagateCoverIn, db: Session = Depends(get_db)):
             updated += 1
     db.commit()
     return {"updated": updated}
+
+
+class EnrichTmdbIn(BaseModel):
+    profile: str
+    space: str = "life"
+
+
+@router.post("/entities/enrich-tmdb")
+async def enrich_tmdb(payload: EnrichTmdbIn, db: Session = Depends(get_db)):
+    """
+    Auto-fills year/director/actors/genres/country/poster for movie and show
+    cards that only have a title so far (i.e. no genres set yet). Cards that
+    already have genres are left untouched, so manual edits are never
+    overwritten by a re-run.
+    """
+    if not settings.TMDB_API_KEY:
+        raise HTTPException(400, "TMDB_API_KEY не настроен на сервере")
+
+    candidates = (db.query(Entity)
+                  .filter(Entity.profile == payload.profile, Entity.space == payload.space,
+                          Entity.type.in_(["movie", "show"]), Entity.is_active == True)  # noqa: E712
+                  .all())
+    to_enrich = [e for e in candidates if not (e.attributes or {}).get("genres")]
+
+    enriched = 0
+    not_found: list[str] = []
+
+    for e in to_enrich:
+        try:
+            data = await tmdb_client.find_movie(e.name) if e.type == "movie" else await tmdb_client.find_tv(e.name)
+        except Exception:
+            not_found.append(e.name)
+            continue
+
+        if not data:
+            not_found.append(e.name)
+            continue
+
+        new_attrs = dict(e.attributes or {})
+        if data.get("year"):
+            new_attrs["year"] = data["year"]
+        if data.get("author"):
+            new_attrs["author"] = data["author"]
+        if data.get("actors"):
+            new_attrs["actors"] = data["actors"]
+        if data.get("genres"):
+            new_attrs["genres"] = data["genres"]
+        if data.get("geo"):
+            new_attrs["geo"] = data["geo"]
+
+        if data.get("poster_url") and not new_attrs.get("cover_path"):
+            try:
+                async with httpx.AsyncClient(timeout=20.0) as client:
+                    img_resp = await client.get(data["poster_url"])
+                if img_resp.status_code == 200:
+                    fname = f"{uuid.uuid4()}.jpg"
+                    with open(os.path.join(COVERS_DIR, fname), "wb") as out:
+                        out.write(img_resp.content)
+                    new_attrs["cover_path"] = fname
+            except Exception:
+                pass  # poster is a nice-to-have — don't fail the whole entity over it
+
+        e.attributes = new_attrs
+        e.updated_at = now()
+        enriched += 1
+
+    db.commit()
+    return {"enriched": enriched, "total_candidates": len(to_enrich), "not_found": not_found}
 
 
 @public_router.get("/entities/cover/{filename}")
