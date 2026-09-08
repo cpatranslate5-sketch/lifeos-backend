@@ -20,6 +20,11 @@ class Settings:
     ANTHROPIC_API_KEY: str = os.environ.get("ANTHROPIC_API_KEY", "")
     CLAUDE_MODEL: str = os.environ.get("CLAUDE_MODEL", "claude-sonnet-5")
 
+    # TMDB — used to auto-fill movie/show metadata (year, director, cast,
+    # genres, country, poster). Optional: the enrichment feature simply
+    # won't work if this isn't set, but the app still starts fine.
+    TMDB_API_KEY: str = os.environ.get("TMDB_API_KEY", "")
+
     # SQLite database file location.
     DATABASE_URL: str = os.environ.get(
         "DATABASE_URL", f"sqlite:///{Path(__file__).resolve().parent.parent / 'data' / 'lifeos.db'}"
