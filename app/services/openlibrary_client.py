@@ -7,10 +7,15 @@ import httpx
 SEARCH_URL = "https://openlibrary.org/search.json"
 COVER_URL = "https://covers.openlibrary.org/b/id/{cover_id}-L.jpg"
 
-LANGUAGE_TO_COUNTRY = {
-    "rus": "Россия", "eng": "США", "fre": "Франция", "ger": "Германия",
-    "spa": "Испания", "ita": "Италия", "jpn": "Япония", "chi": "Китай",
-    "por": "Португалия", "pol": "Польша", "swe": "Швеция", "ukr": "Украина",
+# Same five broad geo buckets as GEO_OPTIONS in types.ts (see tmdb_client.py
+# for the movie/show version of this mapping) — guessed from the book's
+# language code, since Open Library doesn't give a country directly.
+LANGUAGE_TO_GEO = {
+    "rus": "Россия", "ukr": "Россия",
+    "eng": "Америка",
+    "fre": "Европа", "ger": "Европа", "spa": "Европа", "ita": "Европа",
+    "por": "Европа", "pol": "Европа", "swe": "Европа", "dut": "Европа",
+    "jpn": "Азия", "chi": "Азия", "kor": "Азия",
 }
 
 
@@ -29,7 +34,7 @@ async def find_book(title: str) -> dict | None:
     authors = doc.get("author_name") or []
     subjects = (doc.get("subject") or [])[:3]
     languages = doc.get("language") or []
-    geo = next((LANGUAGE_TO_COUNTRY[lang] for lang in languages if lang in LANGUAGE_TO_COUNTRY), None)
+    geo = next((LANGUAGE_TO_GEO[lang] for lang in languages if lang in LANGUAGE_TO_GEO), None)
     cover_id = doc.get("cover_i")
 
     return {
