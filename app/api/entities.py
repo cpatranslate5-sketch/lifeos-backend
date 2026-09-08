@@ -12,7 +12,7 @@ from app.auth import require_auth
 from app.config import settings
 from app.db import get_db
 from app.models import Entity, ChangeLogEntry
-from app.services import tmdb_client
+from app.services import tmdb_client, openlibrary_client
 
 router = APIRouter(dependencies=[Depends(require_auth)])
 public_router = APIRouter()  # cover image serving only — <img> tags can't send auth headers
@@ -254,6 +254,48 @@ def propagate_cover(payload: PropagateCoverIn, db: Session = Depends(get_db)):
     return {"updated": updated}
 
 
+async def _fetch_enrichment(e: Entity) -> dict | None:
+    """Looks up external metadata for one entity, based on its type."""
+    if e.type == "movie":
+        return await tmdb_client.find_movie(e.name)
+    if e.type == "show":
+        return await tmdb_client.find_tv(e.name)
+    if e.type == "book":
+        return await openlibrary_client.find_book(e.name)
+    return None
+
+
+async def _apply_enrichment(e: Entity, data: dict) -> None:
+    """Merges fetched metadata into an entity's attributes and downloads
+    the poster/cover image, if any."""
+    new_attrs = dict(e.attributes or {})
+    if data.get("year"):
+        new_attrs["year"] = data["year"]
+    if data.get("author"):
+        new_attrs["author"] = data["author"]
+    if data.get("actors"):
+        new_attrs["actors"] = data["actors"]
+    if data.get("genres"):
+        new_attrs["genres"] = data["genres"]
+    if data.get("geo"):
+        new_attrs["geo"] = data["geo"]
+
+    if data.get("poster_url") and not new_attrs.get("cover_path"):
+        try:
+            async with httpx.AsyncClient(timeout=20.0) as client:
+                img_resp = await client.get(data["poster_url"])
+            if img_resp.status_code == 200:
+                fname = f"{uuid.uuid4()}.jpg"
+                with open(os.path.join(COVERS_DIR, fname), "wb") as out:
+                    out.write(img_resp.content)
+                new_attrs["cover_path"] = fname
+        except Exception:
+            pass  # poster is a nice-to-have — don't fail the whole entity over it
+
+    e.attributes = new_attrs
+    e.updated_at = now()
+
+
 class EnrichTmdbIn(BaseModel):
     profile: str
     space: str = "life"
@@ -262,17 +304,14 @@ class EnrichTmdbIn(BaseModel):
 @router.post("/entities/enrich-tmdb")
 async def enrich_tmdb(payload: EnrichTmdbIn, db: Session = Depends(get_db)):
     """
-    Auto-fills year/director/actors/genres/country/poster for movie and show
-    cards that only have a title so far (i.e. no genres set yet). Cards that
-    already have genres are left untouched, so manual edits are never
-    overwritten by a re-run.
+    Auto-fills year/author-director/actors/genres/country/cover for
+    movie, show, and book cards that only have a title so far (i.e. no
+    genres set yet). Cards that already have genres are left untouched,
+    so manual edits are never overwritten by a re-run.
     """
-    if not settings.TMDB_API_KEY:
-        raise HTTPException(400, "TMDB_API_KEY не настроен на сервере")
-
     candidates = (db.query(Entity)
                   .filter(Entity.profile == payload.profile, Entity.space == payload.space,
-                          Entity.type.in_(["movie", "show"]), Entity.is_active == True)  # noqa: E712
+                          Entity.type.in_(["movie", "show", "book"]), Entity.is_active == True)  # noqa: E712
                   .all())
     to_enrich = [e for e in candidates if not (e.attributes or {}).get("genres")]
 
@@ -280,46 +319,45 @@ async def enrich_tmdb(payload: EnrichTmdbIn, db: Session = Depends(get_db)):
     not_found: list[str] = []
 
     for e in to_enrich:
-        try:
-            data = await tmdb_client.find_movie(e.name) if e.type == "movie" else await tmdb_client.find_tv(e.name)
-        except Exception:
+        if e.type in ("movie", "show") and not settings.TMDB_API_KEY:
             not_found.append(e.name)
             continue
+        try:
+            data = await _fetch_enrichment(e)
+        except Exception:
+            data = None
 
         if not data:
             not_found.append(e.name)
             continue
 
-        new_attrs = dict(e.attributes or {})
-        if data.get("year"):
-            new_attrs["year"] = data["year"]
-        if data.get("author"):
-            new_attrs["author"] = data["author"]
-        if data.get("actors"):
-            new_attrs["actors"] = data["actors"]
-        if data.get("genres"):
-            new_attrs["genres"] = data["genres"]
-        if data.get("geo"):
-            new_attrs["geo"] = data["geo"]
-
-        if data.get("poster_url") and not new_attrs.get("cover_path"):
-            try:
-                async with httpx.AsyncClient(timeout=20.0) as client:
-                    img_resp = await client.get(data["poster_url"])
-                if img_resp.status_code == 200:
-                    fname = f"{uuid.uuid4()}.jpg"
-                    with open(os.path.join(COVERS_DIR, fname), "wb") as out:
-                        out.write(img_resp.content)
-                    new_attrs["cover_path"] = fname
-            except Exception:
-                pass  # poster is a nice-to-have — don't fail the whole entity over it
-
-        e.attributes = new_attrs
-        e.updated_at = now()
+        await _apply_enrichment(e, data)
         enriched += 1
 
     db.commit()
     return {"enriched": enriched, "total_candidates": len(to_enrich), "not_found": not_found}
+
+
+@router.post("/entities/{entity_id}/enrich", response_model=EntityOut)
+async def enrich_single_entity(entity_id: str, db: Session = Depends(get_db)):
+    """Same idea as /entities/enrich-tmdb, but for exactly one card —
+    used by the "Заполнить карточку автоматически" button on an individual
+    card. Works even if the card already has some fields set (a manual
+    retry is an explicit, deliberate action, unlike the bulk pass)."""
+    e = db.get(Entity, entity_id)
+    if not e:
+        raise HTTPException(404, "Entity not found")
+    if e.type in ("movie", "show") and not settings.TMDB_API_KEY:
+        raise HTTPException(400, "TMDB_API_KEY не настроен на сервере")
+
+    data = await _fetch_enrichment(e)
+    if not data:
+        raise HTTPException(404, "Ничего не найдено по этому названию")
+
+    await _apply_enrichment(e, data)
+    db.commit()
+    db.refresh(e)
+    return EntityOut.model_validate(e)
 
 
 @public_router.get("/entities/cover/{filename}")
