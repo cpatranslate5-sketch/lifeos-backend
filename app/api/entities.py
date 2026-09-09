@@ -340,7 +340,6 @@ async def enrich_tmdb(payload: EnrichTmdbIn, db: Session = Depends(get_db)):
                           Entity.type == payload.type, Entity.is_active == True)  # noqa: E712
                   .all())
     to_enrich = candidates if payload.force else [e for e in candidates if not (e.attributes or {}).get("genres")]
-    to_enrich = [e for e in candidates if not (e.attributes or {}).get("genres")]
 
     enriched = 0
     not_found: list[str] = []
