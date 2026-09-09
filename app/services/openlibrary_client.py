@@ -34,7 +34,7 @@ async def find_book(title: str) -> dict | None:
     authors = doc.get("author_name") or []
     subjects = (doc.get("subject") or [])[:3]
     languages = doc.get("language") or []
-    geo = next((LANGUAGE_TO_GEO[lang] for lang in languages if lang in LANGUAGE_TO_GEO), None)
+    geo = [LANGUAGE_TO_GEO[lang] for lang in languages if lang in LANGUAGE_TO_GEO][:1]
     cover_id = doc.get("cover_i")
 
     return {

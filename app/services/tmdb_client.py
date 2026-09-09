@@ -42,6 +42,15 @@ def geo_bucket(iso_code: str | None) -> str | None:
     return "Остальное"
 
 
+def geo_buckets(countries: list[dict]) -> list[str]:
+    buckets: list[str] = []
+    for c in countries:
+        b = geo_bucket(c.get("iso_3166_1"))
+        if b and b not in buckets:
+            buckets.append(b)
+    return buckets
+
+
 async def _get(path: str, params: dict) -> dict:
     params = {**params, "api_key": settings.TMDB_API_KEY, "language": "ru-RU"}
     async with httpx.AsyncClient(timeout=20.0) as client:
@@ -81,7 +90,7 @@ def _extract_movie_fields(details: dict) -> dict:
     actors = [p["name"] for p in cast[:5]]
     genres = [g["name"] for g in details.get("genres") or []]
     countries = details.get("production_countries") or []
-    geo = geo_bucket(countries[0]["iso_3166_1"]) if countries else None
+    geo = geo_buckets(countries)
     poster_path = details.get("poster_path")
     return {
         "year": year or None,
@@ -101,7 +110,7 @@ def _extract_tv_fields(details: dict) -> dict:
     actors = [p["name"] for p in cast[:5]]
     genres = [g["name"] for g in details.get("genres") or []]
     countries = details.get("production_countries") or []
-    geo = geo_bucket(countries[0]["iso_3166_1"]) if countries else None
+    geo = geo_buckets(countries)
     poster_path = details.get("poster_path")
     return {
         "year": year or None,
