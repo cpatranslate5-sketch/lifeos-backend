@@ -50,6 +50,14 @@ DIARY_PHRASE_PROMPT = """Пользователь спросил про совм
 Найденные факты: {facts}
 Верни только сам текст ответа, без пояснений и без markdown."""
 
+NAME_TRANSLATE_PROMPT = """Приведи следующие имена людей (актёров, режиссёров, авторов) к стандартному
+русскому написанию — так, как их обычно пишут в русскоязычных источниках (транслитерация
+или устоявшийся перевод, а не дословный побуквенный перенос). Если имя уже написано
+кириллицей и выглядит нормально — верни его как есть, не меняя.
+Верни ТОЛЬКО JSON-массив строк, в том же порядке и с тем же количеством элементов, что и на входе,
+без markdown-обрамления и пояснений.
+Имена: {names}"""
+
 
 def similarity(a: str, b: str) -> float:
     if not a or not b:
@@ -141,3 +149,22 @@ async def phrase_diary_answer(question: str, facts: dict) -> str:
     prompt = DIARY_PHRASE_PROMPT.format(question=question, facts=json.dumps(facts, ensure_ascii=False))
     text_block = await _post_to_claude("", prompt, max_tokens=400)
     return text_block.strip()
+
+
+async def translate_names(names: list[str]) -> list[str]:
+    """Converts a list of person names to standard Russian spelling
+    (transliteration), used to clean up director/actor/author names pulled
+    from English-language sources like TMDB. Falls back to the original
+    names if anything goes wrong — this is a nice-to-have, not critical."""
+    if not names:
+        return names
+    try:
+        prompt = NAME_TRANSLATE_PROMPT.format(names=json.dumps(names, ensure_ascii=False))
+        text_block = await _post_to_claude("", prompt, max_tokens=500)
+        cleaned = re.sub(r"```json|```", "", text_block).strip()
+        result = json.loads(cleaned)
+        if isinstance(result, list) and len(result) == len(names):
+            return [str(n) for n in result]
+    except Exception:
+        pass
+    return names
