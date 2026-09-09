@@ -12,7 +12,7 @@ from app.auth import require_auth
 from app.config import settings
 from app.db import get_db
 from app.models import Entity, ChangeLogEntry
-from app.services import tmdb_client, openlibrary_client
+from app.services import tmdb_client, openlibrary_client, claude_client
 
 router = APIRouter(dependencies=[Depends(require_auth)])
 public_router = APIRouter()  # cover image serving only — <img> tags can't send auth headers
@@ -265,20 +265,38 @@ async def _fetch_enrichment(e: Entity) -> dict | None:
     return None
 
 
+def _is_cyrillic(name: str) -> bool:
+    return any("а" <= ch.lower() <= "я" or ch.lower() == "ё" for ch in name)
+
+
 async def _apply_enrichment(e: Entity, data: dict) -> None:
     """Merges fetched metadata into an entity's attributes and downloads
-    the poster/cover image, if any."""
+    the poster/cover image, if any. Director/actor names that came back in
+    a non-Cyrillic script get passed through Claude for standard Russian
+    transliteration first."""
     new_attrs = dict(e.attributes or {})
     if data.get("year"):
         new_attrs["year"] = data["year"]
-    if data.get("author"):
-        new_attrs["author"] = data["author"]
-    if data.get("actors"):
-        new_attrs["actors"] = data["actors"]
+
+    # Collect any Latin-script names for one combined translation call,
+    # rather than translating author and actors separately.
+    author_names = data.get("author") or []
+    actor_names = data.get("actors") or []
+    to_translate = [n for n in (author_names + actor_names) if n and not _is_cyrillic(n)]
+    if to_translate:
+        translated = await claude_client.translate_names(to_translate)
+        lookup = dict(zip(to_translate, translated))
+        author_names = [lookup.get(n, n) for n in author_names]
+        actor_names = [lookup.get(n, n) for n in actor_names]
+
+    if author_names:
+        new_attrs["author"] = author_names
+    if actor_names:
+        new_attrs["actors"] = actor_names
     if data.get("genres"):
         new_attrs["genres"] = data["genres"]
     if data.get("geo"):
-        new_attrs["geo"] = data["geo"]
+        new_attrs["geo"] = data["geo"]  # list of buckets, e.g. ["Америка", "Европа"]
 
     if data.get("poster_url") and not new_attrs.get("cover_path"):
         try:
@@ -300,15 +318,19 @@ class EnrichTmdbIn(BaseModel):
     profile: str
     type: str
     space: str = "life"
+    force: bool = False
 
 
 @router.post("/entities/enrich-tmdb")
 async def enrich_tmdb(payload: EnrichTmdbIn, db: Session = Depends(get_db)):
     """
     Auto-fills year/author-director/actors/genres/country/cover for movie,
-    show, or book cards (whichever one type is passed in) that only have a
-    title so far (i.e. no genres set yet). Cards that already have genres
-    are left untouched, so manual edits are never overwritten by a re-run.
+    show, or book cards. By default only touches cards that only have a
+    title so far (no genres set yet), so manual edits aren't clobbered. Set
+    force=true to re-pull fresh data for EVERY card of that type instead —
+    useful for unifying style across cards that were filled by hand at
+    different times vs. auto-filled, since manual entries can't be told
+    apart from auto-filled ones once saved.
     """
     if payload.type not in ("movie", "show", "book"):
         raise HTTPException(400, "Unsupported type")
@@ -317,6 +339,7 @@ async def enrich_tmdb(payload: EnrichTmdbIn, db: Session = Depends(get_db)):
                   .filter(Entity.profile == payload.profile, Entity.space == payload.space,
                           Entity.type == payload.type, Entity.is_active == True)  # noqa: E712
                   .all())
+    to_enrich = candidates if payload.force else [e for e in candidates if not (e.attributes or {}).get("genres")]
     to_enrich = [e for e in candidates if not (e.attributes or {}).get("genres")]
 
     enriched = 0
