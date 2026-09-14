@@ -427,6 +427,33 @@ async def enrich_single_entity(entity_id: str, db: Session = Depends(get_db)):
     return EntityOut.model_validate(e)
 
 
+@router.post("/entities/{entity_id}/auto-image", response_model=EntityOut)
+async def auto_image_single_entity(entity_id: str, db: Session = Depends(get_db)):
+    """Same idea as /entities/backfill-images, but for exactly one card —
+    used by the "Добавить фото автоматически" button on an individual
+    task/event/leisure/habit card that has no cover yet. Works even if a
+    previous automatic attempt already failed — a manual retry is an
+    explicit, deliberate action."""
+    e = db.get(Entity, entity_id)
+    if not e:
+        raise HTTPException(404, "Entity not found")
+    if not settings.UNSPLASH_ACCESS_KEY:
+        raise HTTPException(400, "UNSPLASH_ACCESS_KEY не настроен на сервере")
+
+    image_url = await _find_auto_image_url(e.name)
+    fname = await _download_and_save_image(image_url) if image_url else None
+    if not fname:
+        raise HTTPException(404, "Не удалось найти подходящее фото по этому названию")
+
+    e.attributes = {**(e.attributes or {}), "cover_path": fname}
+    e.updated_at = now()
+    db.commit()
+    db.refresh(e)
+    return EntityOut.model_validate(e)
+    db.refresh(e)
+    return EntityOut.model_validate(e)
+
+
 class BackfillImagesIn(BaseModel):
     profile: str
     space: str = "life"
