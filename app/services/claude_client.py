@@ -168,3 +168,28 @@ async def translate_names(names: list[str]) -> list[str]:
     except Exception:
         pass
     return names
+
+
+SEARCH_QUERY_PROMPT = """Придумай короткий (2-4 слова) поисковый запрос на английском для стокового
+фотобанка (вроде Unsplash), который лучше всего проиллюстрирует эту карточку задачи/события:
+"{name}"
+Не переводи дословно — выбери общее понятие сути дела (например, "Купить хлеб и молоко" → "grocery
+shopping"; "Позвонить Косте" → "phone call"; "Бокс (групповая)" → "boxing training"). Если название
+слишком личное и обобщить не получается (имя человека, случайный набор слов) — верни наиболее общее
+разумное слово по теме, а не пустоту.
+Верни ТОЛЬКО сам запрос на английском, без кавычек и пояснений."""
+
+
+async def translate_search_query(name: str) -> str:
+    """Turns a Russian (or any-language) card title into a short English
+    search phrase suitable for an image search API — Unsplash's photos are
+    tagged almost entirely in English, so searching with the raw Russian
+    title usually returns nothing. Falls back to the original name if
+    anything goes wrong."""
+    try:
+        prompt = SEARCH_QUERY_PROMPT.format(name=name)
+        text_block = await _post_to_claude("", prompt, max_tokens=30)
+        cleaned = text_block.strip().strip('"').strip("'")
+        return cleaned or name
+    except Exception:
+        return name
