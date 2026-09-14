@@ -78,6 +78,15 @@ def list_entities(type: str | None = Query(default=None), space: str | None = Qu
 AUTO_IMAGE_TYPES = {"task", "event", "leisure", "habit"}
 
 
+async def _find_auto_image_url(name: str) -> str | None:
+    """Translates the (usually Russian) card name into a short English
+    search phrase first — Unsplash's photos are tagged almost entirely in
+    English, so searching with the raw Russian title tends to return
+    nothing at all."""
+    query = await claude_client.translate_search_query(name)
+    return await unsplash_client.find_image(query)
+
+
 async def _download_and_save_image(url: str) -> str | None:
     try:
         async with httpx.AsyncClient(timeout=20.0) as client:
@@ -109,7 +118,7 @@ async def create_entity(payload: EntityCreate, db: Session = Depends(get_db)):
     # Если пользователь следом сам загрузит обложку — она просто заменит
     # это фото (тот же механизм, что и обычная загрузка обложки).
     if e.type in AUTO_IMAGE_TYPES and not (e.attributes or {}).get("cover_path"):
-        image_url = await unsplash_client.find_image(e.name)
+        image_url = await _find_auto_image_url(e.name)
         if image_url:
             fname = await _download_and_save_image(image_url)
             if fname:
@@ -436,7 +445,7 @@ async def backfill_images(payload: BackfillImagesIn, db: Session = Depends(get_d
     filled = 0
     not_found: list[str] = []
     for e in to_fill:
-        image_url = await unsplash_client.find_image(e.name)
+        image_url = await _find_auto_image_url(e.name)
         fname = await _download_and_save_image(image_url) if image_url else None
         if not fname:
             not_found.append(e.name)
