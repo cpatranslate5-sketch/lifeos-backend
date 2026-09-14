@@ -12,7 +12,7 @@ from app.auth import require_auth
 from app.config import settings
 from app.db import get_db
 from app.models import Entity, ChangeLogEntry
-from app.services import tmdb_client, openlibrary_client, claude_client
+from app.services import tmdb_client, openlibrary_client, claude_client, unsplash_client
 
 router = APIRouter(dependencies=[Depends(require_auth)])
 public_router = APIRouter()  # cover image serving only — <img> tags can't send auth headers
@@ -75,8 +75,25 @@ def list_entities(type: str | None = Query(default=None), space: str | None = Qu
     return [EntityOut.model_validate(e) for e in q.order_by(Entity.created_at.asc()).all()]
 
 
+AUTO_IMAGE_TYPES = {"task", "event", "leisure", "habit"}
+
+
+async def _download_and_save_image(url: str) -> str | None:
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            img_resp = await client.get(url)
+        if img_resp.status_code != 200:
+            return None
+        fname = f"{uuid.uuid4()}.jpg"
+        with open(os.path.join(COVERS_DIR, fname), "wb") as out:
+            out.write(img_resp.content)
+        return fname
+    except Exception:
+        return None
+
+
 @router.post("/entities", response_model=EntityOut)
-def create_entity(payload: EntityCreate, db: Session = Depends(get_db)):
+async def create_entity(payload: EntityCreate, db: Session = Depends(get_db)):
     e = Entity(type=payload.type, name=payload.name, space=payload.space, profile=payload.profile,
                attributes=payload.attributes, is_active=True)
     db.add(e)
@@ -86,6 +103,21 @@ def create_entity(payload: EntityCreate, db: Session = Depends(get_db)):
                                            "factors": ["добавлено вручную через интерфейс"], "confidence": 1.0}))
     db.commit()
     db.refresh(e)
+
+    # Ни одна обложка не была указана вручную при создании — попробуем
+    # подтянуть подходящее иллюстративное фото по названию карточки.
+    # Если пользователь следом сам загрузит обложку — она просто заменит
+    # это фото (тот же механизм, что и обычная загрузка обложки).
+    if e.type in AUTO_IMAGE_TYPES and not (e.attributes or {}).get("cover_path"):
+        image_url = await unsplash_client.find_image(e.name)
+        if image_url:
+            fname = await _download_and_save_image(image_url)
+            if fname:
+                e.attributes = {**(e.attributes or {}), "cover_path": fname}
+                e.updated_at = now()
+                db.commit()
+                db.refresh(e)
+
     return EntityOut.model_validate(e)
 
 
@@ -384,6 +416,37 @@ async def enrich_single_entity(entity_id: str, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(e)
     return EntityOut.model_validate(e)
+
+
+class BackfillImagesIn(BaseModel):
+    profile: str
+    space: str = "life"
+
+
+@router.post("/entities/backfill-images")
+async def backfill_images(payload: BackfillImagesIn, db: Session = Depends(get_db)):
+    """One-off pass: attach an Unsplash photo to every existing task/event/
+    leisure/habit card in this profile+space that has no cover yet."""
+    candidates = (db.query(Entity)
+                  .filter(Entity.profile == payload.profile, Entity.space == payload.space,
+                          Entity.type.in_(list(AUTO_IMAGE_TYPES)), Entity.is_active == True)  # noqa: E712
+                  .all())
+    to_fill = [e for e in candidates if not (e.attributes or {}).get("cover_path")]
+
+    filled = 0
+    not_found: list[str] = []
+    for e in to_fill:
+        image_url = await unsplash_client.find_image(e.name)
+        fname = await _download_and_save_image(image_url) if image_url else None
+        if not fname:
+            not_found.append(e.name)
+            continue
+        e.attributes = {**(e.attributes or {}), "cover_path": fname}
+        e.updated_at = now()
+        filled += 1
+
+    db.commit()
+    return {"filled": filled, "total_candidates": len(to_fill), "not_found": not_found}
 
 
 @public_router.get("/entities/cover/{filename}")
