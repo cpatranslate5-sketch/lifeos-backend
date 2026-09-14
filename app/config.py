@@ -25,6 +25,11 @@ class Settings:
     # won't work if this isn't set, but the app still starts fine.
     TMDB_API_KEY: str = os.environ.get("TMDB_API_KEY", "")
 
+    # Unsplash — used to auto-attach an illustrative photo to task/event/
+    # leisure/habit cards when no cover was added manually. Optional: the
+    # feature simply won't do anything if this isn't set.
+    UNSPLASH_ACCESS_KEY: str = os.environ.get("UNSPLASH_ACCESS_KEY", "")
+
     # SQLite database file location.
     DATABASE_URL: str = os.environ.get(
         "DATABASE_URL", f"sqlite:///{Path(__file__).resolve().parent.parent / 'data' / 'lifeos.db'}"
