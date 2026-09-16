@@ -76,6 +76,7 @@ def list_entities(type: str | None = Query(default=None), space: str | None = Qu
 
 
 AUTO_IMAGE_TYPES = {"task", "event", "leisure", "habit"}
+AUTO_ENRICH_TYPES = {"movie", "show", "book"}
 
 
 async def _find_auto_image_url(name: str) -> str | None:
@@ -124,6 +125,21 @@ async def create_entity(payload: EntityCreate, db: Session = Depends(get_db)):
             if fname:
                 e.attributes = {**(e.attributes or {}), "cover_path": fname}
                 e.updated_at = now()
+                db.commit()
+                db.refresh(e)
+
+    # Фильм/сериал/книга без указанного жанра — попробуем сразу дозаполнить
+    # через TMDB/Open Library, тем же способом, что и кнопка "Заполнить
+    # карточку автоматически". Если API-ключ не настроен или ничего не
+    # нашлось — тихо пропускаем, карточка просто остаётся как есть.
+    if e.type in AUTO_ENRICH_TYPES and not (e.attributes or {}).get("genres"):
+        if e.type not in ("movie", "show") or settings.TMDB_API_KEY:
+            try:
+                data = await _fetch_enrichment(e)
+            except Exception:
+                data = None
+            if data:
+                await _apply_enrichment(e, data)
                 db.commit()
                 db.refresh(e)
 
@@ -448,8 +464,6 @@ async def auto_image_single_entity(entity_id: str, db: Session = Depends(get_db)
     e.attributes = {**(e.attributes or {}), "cover_path": fname}
     e.updated_at = now()
     db.commit()
-    db.refresh(e)
-    return EntityOut.model_validate(e)
     db.refresh(e)
     return EntityOut.model_validate(e)
 
