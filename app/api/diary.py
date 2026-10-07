@@ -14,6 +14,7 @@ from app.auth import require_auth
 from app.db import get_db
 from app.models import DiaryEntry, RawLog
 from app.services.claude_client import extract_diary_query, phrase_diary_answer
+from app.services.images import shrink_upload, PHOTO_MAX_SIDE
 
 router = APIRouter(dependencies=[Depends(require_auth)])
 public_router = APIRouter()  # photo serving only — <img> tags can't send auth headers
@@ -67,11 +68,14 @@ async def create_diary_entry(
         ext = os.path.splitext(f.filename or "")[1].lower()
         if ext not in ALLOWED_EXT:
             continue
-        fname = f"{uuid.uuid4()}{ext}"
-        fpath = os.path.join(PHOTOS_DIR, fname)
         content = await f.read()
         if len(content) > 15 * 1024 * 1024:
             continue
+        shrunk = shrink_upload(content, PHOTO_MAX_SIDE)  # ужимаем, чтобы фото не съедали диск
+        if shrunk:
+            content, ext = shrunk
+        fname = f"{uuid.uuid4()}{ext}"
+        fpath = os.path.join(PHOTOS_DIR, fname)
         with open(fpath, "wb") as out:
             out.write(content)
         saved_paths.append(fname)
@@ -93,11 +97,14 @@ async def add_photos_to_entry(entry_id: str, files: list[UploadFile] = File(defa
         ext = os.path.splitext(f.filename or "")[1].lower()
         if ext not in ALLOWED_EXT:
             continue
-        fname = f"{uuid.uuid4()}{ext}"
-        fpath = os.path.join(PHOTOS_DIR, fname)
         content = await f.read()
         if len(content) > 15 * 1024 * 1024:
             continue
+        shrunk = shrink_upload(content, PHOTO_MAX_SIDE)  # ужимаем, чтобы фото не съедали диск
+        if shrunk:
+            content, ext = shrunk
+        fname = f"{uuid.uuid4()}{ext}"
+        fpath = os.path.join(PHOTOS_DIR, fname)
         with open(fpath, "wb") as out:
             out.write(content)
         new_paths.append(fname)

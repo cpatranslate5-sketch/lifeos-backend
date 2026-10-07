@@ -8,7 +8,7 @@ from sqlalchemy import text
 from app.config import settings
 from app.db import Base, engine, SessionLocal
 from app.models import Entity
-from app.api import health, messages, export, entities, lifephase, maintenance, diary, folder_auth
+from app.api import health, messages, export, entities, lifephase, maintenance, diary, folder_auth, media
 
 Base.metadata.create_all(bind=engine)
 
@@ -72,3 +72,4 @@ app.include_router(maintenance.router)
 app.include_router(diary.router)
 app.include_router(diary.public_router)
 app.include_router(folder_auth.router)
+app.include_router(media.router)

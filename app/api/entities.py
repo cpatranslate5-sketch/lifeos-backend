@@ -13,6 +13,7 @@ from app.config import settings
 from app.db import get_db
 from app.models import Entity, ChangeLogEntry
 from app.services import tmdb_client, openlibrary_client, claude_client, unsplash_client
+from app.services.images import shrink_upload, COVER_MAX_SIDE
 
 router = APIRouter(dependencies=[Depends(require_auth)])
 public_router = APIRouter()  # cover image serving only — <img> tags can't send auth headers
@@ -20,6 +21,17 @@ public_router = APIRouter()  # cover image serving only — <img> tags can't sen
 COVERS_DIR = "/app/data/covers"
 os.makedirs(COVERS_DIR, exist_ok=True)
 ALLOWED_EXT = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
+
+
+def _save_cover_bytes(content: bytes, ext: str) -> str:
+    """Сохраняет обложку, предварительно ужав её. Возвращает имя файла."""
+    shrunk = shrink_upload(content, COVER_MAX_SIDE)
+    if shrunk:
+        content, ext = shrunk
+    fname = f"{uuid.uuid4()}{ext}"
+    with open(os.path.join(COVERS_DIR, fname), "wb") as out:
+        out.write(content)
+    return fname
 
 
 def now():
@@ -94,10 +106,7 @@ async def _download_and_save_image(url: str) -> str | None:
             img_resp = await client.get(url)
         if img_resp.status_code != 200:
             return None
-        fname = f"{uuid.uuid4()}.jpg"
-        with open(os.path.join(COVERS_DIR, fname), "wb") as out:
-            out.write(img_resp.content)
-        return fname
+        return _save_cover_bytes(img_resp.content, ".jpg")
     except Exception:
         return None
 
@@ -238,9 +247,7 @@ async def upload_cover(entity_id: str, file: UploadFile = File(...), db: Session
         raise HTTPException(400, "Файл слишком большой (максимум 8 МБ)")
 
     old_cover = (e.attributes or {}).get("cover_path")
-    fname = f"{uuid.uuid4()}{ext}"
-    with open(os.path.join(COVERS_DIR, fname), "wb") as out:
-        out.write(content)
+    fname = _save_cover_bytes(content, ext)
     if old_cover:
         old_path = os.path.join(COVERS_DIR, old_cover)
         if os.path.exists(old_path):
@@ -360,10 +367,7 @@ async def _apply_enrichment(e: Entity, data: dict) -> None:
             async with httpx.AsyncClient(timeout=20.0) as client:
                 img_resp = await client.get(data["poster_url"])
             if img_resp.status_code == 200:
-                fname = f"{uuid.uuid4()}.jpg"
-                with open(os.path.join(COVERS_DIR, fname), "wb") as out:
-                    out.write(img_resp.content)
-                new_attrs["cover_path"] = fname
+                new_attrs["cover_path"] = _save_cover_bytes(img_resp.content, ".jpg")
         except Exception:
             pass  # poster is a nice-to-have — don't fail the whole entity over it
 
