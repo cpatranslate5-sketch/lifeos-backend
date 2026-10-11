@@ -357,9 +357,27 @@ def _has_duration(attrs: dict, etype: str) -> bool:
     return bool(attrs.get("duration_min"))
 
 
+def _needs_seasons(attrs: dict, etype: str) -> bool:
+    return etype == "show" and not attrs.get("seasons_released") and attrs.get("duration_source") != "manual"
+
+
+def _merge_seasons(attrs: dict, data: dict) -> bool:
+    """Сезоны сериала из TMDB: сколько вышло и выходит ли дальше."""
+    changed = False
+    if data.get("seasons_released") and not attrs.get("seasons_released"):
+        attrs["seasons_released"] = int(data["seasons_released"])
+        changed = True
+    if "show_ongoing" in data and "show_ongoing" not in attrs:
+        attrs["show_ongoing"] = bool(data["show_ongoing"])
+        changed = True
+    return changed
+
+
 def _merge_duration(attrs: dict, etype: str, data: dict) -> bool:
     """Дописывает длительность из справочника (TMDB / Open Library), если
     её ещё нет — ручные значения не перетираем. Возвращает True, если записали."""
+    if etype == "show":
+        _merge_seasons(attrs, data)
     if _has_duration(attrs, etype):
         return False
     source = "openlibrary" if etype == "book" else "tmdb"
@@ -512,7 +530,7 @@ async def fill_durations(payload: FillDurationsIn, db: Session = Depends(get_db)
                           Entity.type.in_(types), Entity.is_active == True)  # noqa: E712
                   .all())
     todo = [e for e in candidates
-            if not _has_duration(e.attributes or {}, e.type)
+            if (not _has_duration(e.attributes or {}, e.type) or _needs_seasons(e.attributes or {}, e.type))
             and (payload.include_done or not (e.attributes or {}).get("done"))]
 
     from_catalog = 0
@@ -530,11 +548,15 @@ async def fill_durations(payload: FillDurationsIn, db: Session = Depends(get_db)
 
     for e, data in await asyncio.gather(*(lookup(e) for e in todo)):
         attrs = dict(e.attributes or {})
-        if data and _merge_duration(attrs, e.type, data):
+        had_duration = _has_duration(attrs, e.type)
+        before = dict(attrs)
+        got = bool(data) and _merge_duration(attrs, e.type, data)
+        if attrs != before:
             e.attributes = attrs
             e.updated_at = now()
+        if got:
             from_catalog += 1
-        else:
+        elif not had_duration:
             leftovers.append(e)
     db.commit()
 
@@ -549,8 +571,9 @@ async def fill_durations(payload: FillDurationsIn, db: Session = Depends(get_db)
                 from_ai += 1
         db.commit()
 
+    missing_after = sum(1 for e in todo if not _has_duration(e.attributes or {}, e.type))
     return {"checked": len(todo), "from_catalog": from_catalog, "from_ai": from_ai,
-            "not_filled": len(todo) - from_catalog - from_ai}
+            "not_filled": missing_after}
 
 
 @router.post("/entities/{entity_id}/enrich", response_model=EntityOut)

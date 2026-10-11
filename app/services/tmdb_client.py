@@ -118,6 +118,14 @@ def _tv_total_minutes(details: dict) -> int | None:
     return int(round(episodes * ep_len))
 
 
+def _released_seasons(details: dict) -> int | None:
+    """Сколько сезонов уже вышло (без «спецвыпусков» — сезона 0)."""
+    seasons = [s for s in (details.get("seasons") or []) if (s.get("season_number") or 0) > 0 and (s.get("episode_count") or 0) > 0]
+    if seasons:
+        return len(seasons)
+    return details.get("number_of_seasons") or None
+
+
 def _extract_tv_fields(details: dict) -> dict:
     year = (details.get("first_air_date") or "")[:4]
     creators = details.get("created_by") or []
@@ -131,6 +139,10 @@ def _extract_tv_fields(details: dict) -> dict:
     return {
         "year": year or None,
         "duration_min": _tv_total_minutes(details),
+        # Сезоны: сколько уже вышло и выходит ли сериал дальше —
+        # чтобы учитывать будущие сезоны в расчёте времени.
+        "seasons_released": _released_seasons(details),
+        "show_ongoing": (details.get("status") in ("Returning Series", "In Production", "Planned")) or bool(details.get("in_production")),
         "author": [director] if director else [],
         "actors": actors,
         "genres": genres,
