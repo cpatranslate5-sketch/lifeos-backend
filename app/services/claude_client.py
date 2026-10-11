@@ -212,29 +212,42 @@ DURATION_PROMPT = """Оцени длительность для каждого �
 {items}"""
 
 
+def _parse_number(v) -> float | None:
+    """Число из ответа модели: 120, "120", "120-150" (берём среднее), "≈ 35 ч"."""
+    if isinstance(v, (int, float)):
+        return float(v) if v > 0 else None
+    nums = [float(x.replace(",", ".")) for x in re.findall(r"\d+(?:[.,]\d+)?", str(v))]
+    if not nums:
+        return None
+    val = sum(nums[:2]) / min(len(nums), 2)
+    return val if val > 0 else None
+
+
+async def _estimate_chunk(chunk: list[dict]) -> list[float | None]:
+    lines = []
+    for i, it in enumerate(chunk, 1):
+        extra = ", ".join(str(x) for x in [it.get("year"), it.get("author")] if x)
+        lines.append(f'{i}. [{it["type"]}] {it["name"]}' + (f" ({extra})" if extra else ""))
+    try:
+        text_block = await _post_to_claude("", DURATION_PROMPT.format(items="\n".join(lines)),
+                                           max_tokens=60 + 25 * len(chunk))
+        match = re.search(r"\[[\s\S]*\]", text_block)  # модель иногда добавляет пояснения вокруг
+        arr = json.loads(match.group(0)) if match else None
+        if isinstance(arr, list) and len(arr) == len(chunk):
+            return [_parse_number(v) for v in arr]
+    except Exception:
+        pass
+    # Не получилось целиком — делим пачку пополам и пробуем ещё раз.
+    if len(chunk) == 1:
+        return [None]
+    mid = len(chunk) // 2
+    return (await _estimate_chunk(chunk[:mid])) + (await _estimate_chunk(chunk[mid:]))
+
+
 async def estimate_durations(items: list[dict]) -> list[float | None]:
     """items: [{"type": "movie"|"show"|"game"|"book", "name": ..., "year"?: ..., "author"?: ...}].
     Возвращает числа в единицах из промпта (минуты / часы для игр / страницы для книг)
-    или None для позиций, которые не удалось оценить. Работает пачками."""
-    results: list[float | None] = []
-    for start in range(0, len(items), 40):
-        chunk = items[start:start + 40]
-        lines = []
-        for i, it in enumerate(chunk, 1):
-            extra = ", ".join(str(x) for x in [it.get("year"), it.get("author")] if x)
-            lines.append(f'{i}. [{it["type"]}] {it["name"]}' + (f" ({extra})" if extra else ""))
-        try:
-            text_block = await _post_to_claude("", DURATION_PROMPT.format(items="\n".join(lines)), max_tokens=600)
-            cleaned = re.sub(r"```json|```", "", text_block).strip()
-            arr = json.loads(cleaned)
-            if not isinstance(arr, list) or len(arr) != len(chunk):
-                raise ValueError("bad length")
-            for v in arr:
-                try:
-                    f = float(v)
-                    results.append(f if f > 0 else None)
-                except (TypeError, ValueError):
-                    results.append(None)
-        except Exception:
-            results.extend([None] * len(chunk))
-    return results
+    или None для позиций, которые не удалось оценить. Работает пачками по 15."""
+    chunks = [items[s:s + 15] for s in range(0, len(items), 15)]
+    parts = await asyncio.gather(*(_estimate_chunk(c) for c in chunks))
+    return [v for part in parts for v in part]
