@@ -339,7 +339,9 @@ async def _apply_enrichment(e: Entity, data: dict) -> None:
     a non-Cyrillic script get passed through Claude for standard Russian
     transliteration first."""
     new_attrs = dict(e.attributes or {})
-    if data.get("year"):
+    # Год, введённый вручную (например, год написания книги), не перетираем:
+    # справочники часто отдают год конкретного издания, а не оригинала.
+    if data.get("year") and not new_attrs.get("year"):
         new_attrs["year"] = data["year"]
 
     # Collect any Latin-script names for one combined translation call,
