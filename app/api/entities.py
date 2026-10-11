@@ -1,3 +1,4 @@
+import asyncio
 import os
 import uuid
 from datetime import datetime, timezone
@@ -151,6 +152,20 @@ async def create_entity(payload: EntityCreate, db: Session = Depends(get_db)):
                 await _apply_enrichment(e, data)
                 db.commit()
                 db.refresh(e)
+
+    # Длительность (для расчёта «сколько времени уйдёт»): если справочник её
+    # не дал (или это игра — для игр справочника нет), просим Claude оценить.
+    if e.type in DURATION_TYPES and not _has_duration(e.attributes or {}, e.type):
+        try:
+            [value] = await claude_client.estimate_durations([_ai_item(e)])
+            attrs = dict(e.attributes or {})
+            if _apply_ai_estimate(attrs, e.type, value):
+                e.attributes = attrs
+                e.updated_at = now()
+                db.commit()
+                db.refresh(e)
+        except Exception:
+            pass
 
     return EntityOut.model_validate(e)
 
@@ -333,6 +348,55 @@ def _is_cyrillic(name: str) -> bool:
     return any("а" <= ch.lower() <= "я" or ch.lower() == "ё" for ch in name)
 
 
+DURATION_TYPES = ("movie", "show", "book", "game")
+
+
+def _has_duration(attrs: dict, etype: str) -> bool:
+    if etype == "book":
+        return bool(attrs.get("pages") or attrs.get("duration_min"))
+    return bool(attrs.get("duration_min"))
+
+
+def _merge_duration(attrs: dict, etype: str, data: dict) -> bool:
+    """Дописывает длительность из справочника (TMDB / Open Library), если
+    её ещё нет — ручные значения не перетираем. Возвращает True, если записали."""
+    if _has_duration(attrs, etype):
+        return False
+    source = "openlibrary" if etype == "book" else "tmdb"
+    if etype == "book" and data.get("pages"):
+        attrs["pages"] = int(data["pages"])
+        attrs["duration_source"] = source
+        return True
+    if etype in ("movie", "show") and data.get("duration_min"):
+        attrs["duration_min"] = int(data["duration_min"])
+        attrs["duration_source"] = source
+        return True
+    return False
+
+
+def _apply_ai_estimate(attrs: dict, etype: str, value: float | None) -> bool:
+    """Записывает оценку от Claude. Для игр модель отвечает в часах,
+    для книг — в страницах, для фильмов/сериалов — в минутах."""
+    if not value or _has_duration(attrs, etype):
+        return False
+    if etype == "book":
+        attrs["pages"] = int(round(value))
+    elif etype == "game":
+        attrs["duration_min"] = int(round(value * 60))
+    else:
+        attrs["duration_min"] = int(round(value))
+    attrs["duration_source"] = "ai"
+    return True
+
+
+def _ai_item(e: Entity) -> dict:
+    a = e.attributes or {}
+    author = a.get("author") or a.get("developer")
+    if isinstance(author, list):
+        author = ", ".join(author[:2])
+    return {"type": e.type, "name": e.name, "year": a.get("year"), "author": author}
+
+
 async def _apply_enrichment(e: Entity, data: dict) -> None:
     """Merges fetched metadata into an entity's attributes and downloads
     the poster/cover image, if any. Director/actor names that came back in
@@ -361,6 +425,7 @@ async def _apply_enrichment(e: Entity, data: dict) -> None:
         new_attrs["actors"] = actor_names
     if data.get("genres"):
         new_attrs["genres"] = data["genres"]
+    _merge_duration(new_attrs, e.type, data)
     if data.get("geo"):
         new_attrs["geo"] = data["geo"]  # list of buckets, e.g. ["Америка", "Европа"]
 
@@ -425,6 +490,67 @@ async def enrich_tmdb(payload: EnrichTmdbIn, db: Session = Depends(get_db)):
 
     db.commit()
     return {"enriched": enriched, "total_candidates": len(to_enrich), "not_found": not_found}
+
+
+class FillDurationsIn(BaseModel):
+    profile: str
+    space: str = "life"
+    types: list[str] = list(DURATION_TYPES)
+    include_done: bool = False
+
+
+@router.post("/entities/fill-durations")
+async def fill_durations(payload: FillDurationsIn, db: Session = Depends(get_db)):
+    """Заполняет длительность у карточек, где её ещё нет. Сначала пробует
+    справочники (TMDB для фильмов/сериалов, Open Library для книг), всё, что
+    не нашлось, и все игры — оценивает Claude одним-двумя пакетными запросами.
+    По умолчанию трогает только непросмотренное/непрочитанное — именно оно
+    нужно для расчёта времени."""
+    types = [t for t in payload.types if t in DURATION_TYPES]
+    candidates = (db.query(Entity)
+                  .filter(Entity.profile == payload.profile, Entity.space == payload.space,
+                          Entity.type.in_(types), Entity.is_active == True)  # noqa: E712
+                  .all())
+    todo = [e for e in candidates
+            if not _has_duration(e.attributes or {}, e.type)
+            and (payload.include_done or not (e.attributes or {}).get("done"))]
+
+    from_catalog = 0
+    leftovers: list[Entity] = []
+    sem = asyncio.Semaphore(5)
+
+    async def lookup(e: Entity):
+        if e.type == "game" or (e.type in ("movie", "show") and not settings.TMDB_API_KEY):
+            return e, None
+        async with sem:
+            try:
+                return e, await _fetch_enrichment(e)
+            except Exception:
+                return e, None
+
+    for e, data in await asyncio.gather(*(lookup(e) for e in todo)):
+        attrs = dict(e.attributes or {})
+        if data and _merge_duration(attrs, e.type, data):
+            e.attributes = attrs
+            e.updated_at = now()
+            from_catalog += 1
+        else:
+            leftovers.append(e)
+    db.commit()
+
+    from_ai = 0
+    if leftovers:
+        values = await claude_client.estimate_durations([_ai_item(e) for e in leftovers])
+        for e, v in zip(leftovers, values):
+            attrs = dict(e.attributes or {})
+            if _apply_ai_estimate(attrs, e.type, v):
+                e.attributes = attrs
+                e.updated_at = now()
+                from_ai += 1
+        db.commit()
+
+    return {"checked": len(todo), "from_catalog": from_catalog, "from_ai": from_ai,
+            "not_filled": len(todo) - from_catalog - from_ai}
 
 
 @router.post("/entities/{entity_id}/enrich", response_model=EntityOut)

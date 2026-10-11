@@ -92,14 +92,30 @@ def _extract_movie_fields(details: dict) -> dict:
     countries = details.get("production_countries") or []
     geo = geo_buckets(countries)
     poster_path = details.get("poster_path")
+    runtime = details.get("runtime") or None
     return {
         "year": year or None,
+        "duration_min": int(runtime) if runtime else None,
         "author": [director] if director else [],  # "Режиссёр" field for movies
         "actors": actors,
         "genres": genres,
         "geo": geo,
         "poster_url": f"{IMAGE_BASE}{poster_path}" if poster_path else None,
     }
+
+
+def _tv_total_minutes(details: dict) -> int | None:
+    """Сколько минут займут ВСЕ вышедшие серии: число серий × длина серии.
+    TMDB не всегда заполняет длину серии, поэтому берём то, что есть."""
+    episodes = details.get("number_of_episodes") or 0
+    run_times = [r for r in (details.get("episode_run_time") or []) if r]
+    ep_len = sum(run_times) / len(run_times) if run_times else None
+    if not ep_len:
+        ep_len = ((details.get("last_episode_to_air") or {}).get("runtime")
+                  or (details.get("next_episode_to_air") or {}).get("runtime"))
+    if not episodes or not ep_len:
+        return None
+    return int(round(episodes * ep_len))
 
 
 def _extract_tv_fields(details: dict) -> dict:
@@ -114,6 +130,7 @@ def _extract_tv_fields(details: dict) -> dict:
     poster_path = details.get("poster_path")
     return {
         "year": year or None,
+        "duration_min": _tv_total_minutes(details),
         "author": [director] if director else [],
         "actors": actors,
         "genres": genres,

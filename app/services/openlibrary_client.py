@@ -36,9 +36,11 @@ async def find_book(title: str) -> dict | None:
     languages = doc.get("language") or []
     geo = [LANGUAGE_TO_GEO[lang] for lang in languages if lang in LANGUAGE_TO_GEO][:1]
     cover_id = doc.get("cover_i")
+    pages = doc.get("number_of_pages_median")
 
     return {
         "year": str(year) if year else None,
+        "pages": int(pages) if pages else None,
         "author": authors[:2],
         "genres": subjects,
         "geo": geo,

@@ -193,3 +193,48 @@ async def translate_search_query(name: str) -> str:
         return cleaned or name
     except Exception:
         return name
+
+
+DURATION_PROMPT = """Оцени длительность для каждого пункта списка. Это личная медиатека пользователя
+(фильмы, сериалы, книги, игры), названия обычно на русском. Нужна реалистичная оценка, как на
+Кинопоиске / HowLongToBeat / в типичном русском издании книги.
+
+Правила по типам:
+- "movie": длительность фильма в минутах.
+- "show": СУММАРНО минут на ВСЕ вышедшие сезоны и серии (число серий × длина серии).
+- "game": часов на прохождение основного сюжета с умеренным количеством побочного (как "Main + Extras" на HowLongToBeat).
+- "book": количество страниц в типичном русском издании.
+
+Если совсем не знаешь произведение — дай разумную оценку по типу и жанру (не пропускай).
+Верни ТОЛЬКО JSON-массив чисел той же длины и в том же порядке, что и список, без пояснений.
+
+Список:
+{items}"""
+
+
+async def estimate_durations(items: list[dict]) -> list[float | None]:
+    """items: [{"type": "movie"|"show"|"game"|"book", "name": ..., "year"?: ..., "author"?: ...}].
+    Возвращает числа в единицах из промпта (минуты / часы для игр / страницы для книг)
+    или None для позиций, которые не удалось оценить. Работает пачками."""
+    results: list[float | None] = []
+    for start in range(0, len(items), 40):
+        chunk = items[start:start + 40]
+        lines = []
+        for i, it in enumerate(chunk, 1):
+            extra = ", ".join(str(x) for x in [it.get("year"), it.get("author")] if x)
+            lines.append(f'{i}. [{it["type"]}] {it["name"]}' + (f" ({extra})" if extra else ""))
+        try:
+            text_block = await _post_to_claude("", DURATION_PROMPT.format(items="\n".join(lines)), max_tokens=600)
+            cleaned = re.sub(r"```json|```", "", text_block).strip()
+            arr = json.loads(cleaned)
+            if not isinstance(arr, list) or len(arr) != len(chunk):
+                raise ValueError("bad length")
+            for v in arr:
+                try:
+                    f = float(v)
+                    results.append(f if f > 0 else None)
+                except (TypeError, ValueError):
+                    results.append(None)
+        except Exception:
+            results.extend([None] * len(chunk))
+    return results
