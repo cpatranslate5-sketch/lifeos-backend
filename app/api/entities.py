@@ -167,6 +167,12 @@ async def create_entity(payload: EntityCreate, db: Session = Depends(get_db)):
         except Exception:
             pass
 
+    # Серия/франшиза: часть ли это уже известной серии (или новой — вместе с похожими карточками)
+    try:
+        await _auto_assign_series(e, db)
+    except Exception:
+        pass
+
     return EntityOut.model_validate(e)
 
 
@@ -508,6 +514,94 @@ async def enrich_tmdb(payload: EnrichTmdbIn, db: Session = Depends(get_db)):
 
     db.commit()
     return {"enriched": enriched, "total_candidates": len(to_enrich), "not_found": not_found}
+
+
+SERIES_TYPES = ("movie", "show", "book", "game")
+SERIES_KIND = {"movie": "фильмы", "show": "сериалы", "book": "книги", "game": "игры"}
+
+
+def _norm_words(s: str) -> set[str]:
+    import re as _re
+    s = s.lower().replace("ё", "е")
+    return {w for w in _re.split(r"[^a-zа-я0-9]+", s) if len(w) >= 4}
+
+
+async def _auto_assign_series(e: Entity, db: Session) -> None:
+    """Новая карточка: просим Claude определить, часть ли она серии.
+    Учитываем уже существующие серии и похожие по названию одиночные карточки."""
+    if e.type not in SERIES_TYPES or (e.attributes or {}).get("series"):
+        return
+    others = (db.query(Entity)
+              .filter(Entity.profile == e.profile, Entity.type == e.type,
+                      Entity.is_active == True, Entity.id != e.id)  # noqa: E712
+              .all())
+    series_names = sorted({(o.attributes or {}).get("series") for o in others if (o.attributes or {}).get("series")})
+    words = _norm_words(e.name)
+    singles = [o for o in others if not (o.attributes or {}).get("series") and words & _norm_words(o.name)]
+    if not series_names and not singles:
+        return
+    single_items = [{"i": i, "name": o.name, "year": (o.attributes or {}).get("year")} for i, o in enumerate(singles)]
+    res = await claude_client.assign_series(SERIES_KIND[e.type], e.name, (e.attributes or {}).get("year"),
+                                            series_names, single_items)
+    name = (res.get("series") or "").strip() if isinstance(res.get("series"), str) else ""
+    if not name:
+        return
+    attrs = dict(e.attributes or {})
+    attrs.update({"series": name, "series_order": res.get("order") or 0, "series_source": "ai"})
+    e.attributes = attrs
+    for pair in res.get("join") or []:
+        try:
+            idx, order = int(pair[0]), pair[1] if len(pair) > 1 else 0
+            o = singles[idx]
+        except (ValueError, TypeError, IndexError):
+            continue
+        oa = dict(o.attributes or {})
+        if not oa.get("series"):
+            oa.update({"series": name, "series_order": order or 0, "series_source": "ai"})
+            o.attributes = oa
+            o.updated_at = now()
+    e.updated_at = now()
+    db.commit()
+    db.refresh(e)
+
+
+class DetectSeriesIn(BaseModel):
+    profile: str
+    space: str = "life"
+    types: list[str] = list(SERIES_TYPES)
+
+
+@router.post("/entities/detect-series")
+async def detect_series(payload: DetectSeriesIn, db: Session = Depends(get_db)):
+    """Разово находит серии/франшизы в медиатеке (Claude смотрит весь список
+    раздела сразу) и проставляет карточкам series / series_order. Серии,
+    которые пользователь указал вручную, не трогаем."""
+    result = {}
+    for t in [x for x in payload.types if x in SERIES_TYPES]:
+        ents = (db.query(Entity)
+                .filter(Entity.profile == payload.profile, Entity.space == payload.space,
+                        Entity.type == t, Entity.is_active == True)  # noqa: E712
+                .all())
+        if len(ents) < 2:
+            continue
+        items = [{"i": i, "name": e.name, "year": (e.attributes or {}).get("year")} for i, e in enumerate(ents)]
+        groups = await claude_client.detect_series(SERIES_KIND[t], items)
+        assigned = 0
+        for g in groups:
+            for idx, order in g["items"]:
+                if not (0 <= idx < len(ents)):
+                    continue
+                e = ents[idx]
+                a = dict(e.attributes or {})
+                if a.get("series_source") == "manual":
+                    continue
+                a.update({"series": g["series"], "series_order": order, "series_source": "ai"})
+                e.attributes = a
+                e.updated_at = now()
+                assigned += 1
+        db.commit()
+        result[t] = {"series": len(groups), "items": assigned}
+    return result
 
 
 class FillDurationsIn(BaseModel):

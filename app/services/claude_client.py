@@ -251,3 +251,71 @@ async def estimate_durations(items: list[dict]) -> list[float | None]:
     chunks = [items[s:s + 15] for s in range(0, len(items), 15)]
     parts = await asyncio.gather(*(_estimate_chunk(c) for c in chunks))
     return [v for part in parts for v in part]
+
+
+SERIES_PROMPT = """Ниже список произведений из личной медиатеки (тип: {kind}). Найди среди них части
+одной серии/франшизы: сиквелы, приквелы, номерные части, спин-оффы одной вселенной, книги одного цикла.
+
+Правила:
+- Название серии — короткое общепринятое по-русски: «Гарри Поттер», «Форсаж», «Звёздные войны»,
+  «Тёмная башня», «Шерлок Холмс», «Assassin's Creed» (для игр можно оригинальное название).
+- Включай только серии, где в списке есть хотя бы ДВЕ позиции.
+- Большие вселенные делай по линейке героя (например, «Железный человек», а не вся киновселенная Marvel).
+- Не объединяй разные произведения только из-за похожего названия (книга и фильм — разные типы, их тут нет).
+- Порядок — порядок выхода (для книжных циклов — общепринятый порядок чтения).
+
+Верни ТОЛЬКО JSON-массив без пояснений:
+[{{"series": "Название", "items": [[номер, порядок], ...]}}, ...]
+
+Список (номер. название (год)):
+{items}"""
+
+
+async def detect_series(kind: str, items: list[dict]) -> list[dict]:
+    """items: [{"i": номер, "name": ..., "year": ...}]. Возвращает
+    [{"series": str, "items": [[i, order], ...]}]. При ошибке — пустой список."""
+    lines = "\n".join(f'{it["i"]}. {it["name"]}' + (f' ({it["year"]})' if it.get("year") else "") for it in items)
+    try:
+        text_block = await _post_to_claude("", SERIES_PROMPT.format(kind=kind, items=lines), max_tokens=12000)
+        match = re.search(r"\[[\s\S]*\]", text_block)
+        data = json.loads(match.group(0)) if match else []
+        out = []
+        for g in data if isinstance(data, list) else []:
+            name = str(g.get("series") or "").strip()
+            members = [m for m in (g.get("items") or []) if isinstance(m, list) and len(m) >= 1]
+            if name and len(members) >= 2:
+                out.append({"series": name, "items": [[int(m[0]), float(m[1]) if len(m) > 1 and m[1] is not None else 0] for m in members]})
+        return out
+    except Exception:
+        return []
+
+
+SERIES_ONE_PROMPT = """Новое произведение в медиатеке (тип: {kind}): «{name}»{year}.
+
+Серии, которые уже есть в медиатеке этого типа:
+{series}
+
+Похожие по названию одиночные произведения (номер. название (год)):
+{singles}
+
+Ответь, относится ли новое произведение к серии/франшизе (сиквел, приквел, часть цикла, спин-офф).
+- Если к одной из существующих серий — {{"series": "<точное название из списка>", "order": <порядковый номер части>}}.
+- Если оно образует новую серию с кем-то из одиночных — {{"series": "<короткое общепринятое название по-русски>",
+  "order": <номер новой части>, "join": [[номер одиночного, его порядок], ...]}}.
+- Иначе {{"series": null}}.
+Верни ТОЛЬКО JSON."""
+
+
+async def assign_series(kind: str, name: str, year: str | None, series_names: list[str], singles: list[dict]) -> dict:
+    try:
+        prompt = SERIES_ONE_PROMPT.format(
+            kind=kind, name=name, year=f" ({year})" if year else "",
+            series="\n".join(f"- {s}" for s in series_names[:200]) or "(нет)",
+            singles="\n".join(f'{s["i"]}. {s["name"]}' + (f' ({s["year"]})' if s.get("year") else "") for s in singles[:60]) or "(нет)",
+        )
+        text_block = await _post_to_claude("", prompt, max_tokens=300)
+        match = re.search(r"\{[\s\S]*\}", text_block)
+        data = json.loads(match.group(0)) if match else {}
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
