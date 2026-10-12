@@ -51,6 +51,27 @@ def geo_buckets(countries: list[dict]) -> list[str]:
     return buckets
 
 
+# Жанры TMDB (ru-RU) → жанры приложения (как в фильтрах Life OS).
+_GENRE_MAP = {
+    "боевик": ["Боевик"], "вестерн": ["Вестерн"], "военный": ["Военный"], "детектив": ["Детектив"],
+    "драма": ["Драма"], "история": ["История"], "комедия": ["Комедия"], "криминал": ["Криминал"],
+    "мелодрама": ["Мелодрама"], "музыка": ["Мюзикл"], "мультфильм": ["Мультфильм"],
+    "приключения": ["Приключения"], "семейный": ["Семейный"], "триллер": ["Триллер"],
+    "ужасы": ["Ужасы/Мистика"], "фантастика": ["Фантастика"], "фэнтези": ["Фэнтези"],
+    "боевик и приключения": ["Боевик", "Приключения"], "нф и фэнтези": ["Фантастика", "Фэнтези"],
+    "война и политика": ["Военный"],
+}
+
+
+def _map_genres(names: list) -> list:
+    out = []
+    for n in names:
+        for g in _GENRE_MAP.get(str(n).strip().lower(), []):
+            if g not in out:
+                out.append(g)
+    return out
+
+
 async def _get(path: str, params: dict) -> dict:
     params = {**params, "api_key": settings.TMDB_API_KEY, "language": "ru-RU"}
     async with httpx.AsyncClient(timeout=20.0) as client:
@@ -59,25 +80,40 @@ async def _get(path: str, params: dict) -> dict:
         return resp.json()
 
 
-async def find_movie(title: str) -> dict | None:
+def _pick(results: list, year, date_key: str) -> dict:
+    """Из результатов поиска берём тот, чей год совпадает с годом карточки
+    (±1), — иначе по названию легко попасть в ремейк или другой фильм."""
+    try:
+        y = int(str(year)[:4]) if year else None
+    except ValueError:
+        y = None
+    if y:
+        for r in results:
+            d = (r.get(date_key) or "")[:4]
+            if d.isdigit() and abs(int(d) - y) <= 1:
+                return r
+    return results[0]
+
+
+async def find_movie(title: str, year=None) -> dict | None:
     """Search TMDB for a movie by title, returning the best match's details
     (or None if nothing found)."""
     search = await _get("/search/movie", {"query": title})
     results = search.get("results") or []
     if not results:
         return None
-    movie_id = results[0]["id"]
+    movie_id = _pick(results, year, "release_date")["id"]
     details = await _get(f"/movie/{movie_id}", {"append_to_response": "credits"})
     return _extract_movie_fields(details)
 
 
-async def find_tv(title: str) -> dict | None:
+async def find_tv(title: str, year=None) -> dict | None:
     """Same as find_movie, but for TV shows."""
     search = await _get("/search/tv", {"query": title})
     results = search.get("results") or []
     if not results:
         return None
-    tv_id = results[0]["id"]
+    tv_id = _pick(results, year, "first_air_date")["id"]
     details = await _get(f"/tv/{tv_id}", {"append_to_response": "credits"})
     return _extract_tv_fields(details)
 
@@ -88,7 +124,7 @@ def _extract_movie_fields(details: dict) -> dict:
     director = next((p["name"] for p in crew if p.get("job") == "Director"), None)
     cast = (details.get("credits") or {}).get("cast") or []
     actors = [p["name"] for p in cast[:5]]
-    genres = [g["name"] for g in details.get("genres") or []]
+    genres = _map_genres([g["name"] for g in details.get("genres") or []])
     countries = details.get("production_countries") or []
     geo = geo_buckets(countries)
     poster_path = details.get("poster_path")
@@ -132,7 +168,7 @@ def _extract_tv_fields(details: dict) -> dict:
     director = creators[0]["name"] if creators else None
     cast = (details.get("credits") or {}).get("cast") or []
     actors = [p["name"] for p in cast[:5]]
-    genres = [g["name"] for g in details.get("genres") or []]
+    genres = _map_genres([g["name"] for g in details.get("genres") or []])
     countries = details.get("production_countries") or []
     geo = geo_buckets(countries)
     poster_path = details.get("poster_path")

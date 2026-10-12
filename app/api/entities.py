@@ -343,9 +343,9 @@ def propagate_cover(payload: PropagateCoverIn, db: Session = Depends(get_db)):
 async def _fetch_enrichment(e: Entity) -> dict | None:
     """Looks up external metadata for one entity, based on its type."""
     if e.type == "movie":
-        return await tmdb_client.find_movie(e.name)
+        return await tmdb_client.find_movie(e.name, (e.attributes or {}).get("year"))
     if e.type == "show":
-        return await tmdb_client.find_tv(e.name)
+        return await tmdb_client.find_tv(e.name, (e.attributes or {}).get("year"))
     if e.type == "book":
         return await openlibrary_client.find_book(e.name)
     return None
@@ -442,6 +442,15 @@ async def _apply_enrichment(e: Entity, data: dict) -> None:
     a non-Cyrillic script get passed through Claude for standard Russian
     transliteration first."""
     new_attrs = dict(e.attributes or {})
+    # Фильм/сериал: если справочник нашёл тайтл другого года (ремейк, мультфильм
+    # с тем же названием, совсем другой фильм) — это не наша карточка, ничего
+    # из него не берём. Расхождение в год допускаем (премьеры в разных странах).
+    if e.type in ("movie", "show") and new_attrs.get("year") and data.get("year"):
+        try:
+            if abs(int(str(new_attrs["year"])[:4]) - int(str(data["year"])[:4])) > 1:
+                return
+        except (TypeError, ValueError):
+            pass
     # Год, введённый вручную (например, год написания книги), не перетираем:
     # справочники часто отдают год конкретного издания, а не оригинала.
     if data.get("year") and not new_attrs.get("year"):
