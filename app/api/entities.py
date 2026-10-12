@@ -1,5 +1,6 @@
 import asyncio
 import os
+import re as _re
 import uuid
 from datetime import datetime, timezone
 
@@ -421,6 +422,20 @@ def _ai_item(e: Entity) -> dict:
     return {"type": e.type, "name": e.name, "year": a.get("year"), "author": author}
 
 
+def _author_words(names) -> set:
+    words = set()
+    for n in names or []:
+        for w in _re.split(r"[^a-zа-яё]+", str(n).lower().replace("ё", "е")):
+            if len(w) >= 4:
+                words.add(w)
+    return words
+
+
+def _same_author(a, b) -> bool:
+    """Есть ли у двух списков авторов хотя бы одно общее слово (фамилия)."""
+    return bool(_author_words(a) & _author_words(b))
+
+
 async def _apply_enrichment(e: Entity, data: dict) -> None:
     """Merges fetched metadata into an entity's attributes and downloads
     the poster/cover image, if any. Director/actor names that came back in
@@ -443,7 +458,17 @@ async def _apply_enrichment(e: Entity, data: dict) -> None:
         author_names = [lookup.get(n, n) for n in author_names]
         actor_names = [lookup.get(n, n) for n in actor_names]
 
-    if author_names:
+    # Автор, уже указанный на карточке, не перетираем. Если справочник нашёл
+    # книгу другого автора — значит, это вообще другая книга с похожим
+    # названием (частая беда Open Library на русских названиях): тогда не
+    # берём из неё ничего — ни автора, ни обложку, ни жанры, ни страницы.
+    existing_author = new_attrs.get("author")
+    if existing_author and author_names:
+        if isinstance(existing_author, str):
+            existing_author = [existing_author]
+        if e.type == "book" and not _same_author(existing_author, author_names):
+            return
+    elif author_names:
         new_attrs["author"] = author_names
     if actor_names:
         new_attrs["actors"] = actor_names
